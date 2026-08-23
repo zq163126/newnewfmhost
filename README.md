@@ -1,5 +1,7 @@
 # 🚀 Freemchost 服务器全自动续期助手 (使用gemini生成)
 
+源代码作者：https://github.com/zhisibi/renew-freemchost
+
 [注册地址](https://freemchost.com)
 ![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-GitHub%20Actions-orange)
