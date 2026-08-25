@@ -26,6 +26,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests
 
+    - name: 启用 WARP 网络
+      uses: fscarmen/warp-on-actions@v1.3
+      with:
+          stack: dual
+          mode: client
+
     # 4. 运行续期脚本 (通过 tee 将干净的日志双向输出到屏幕和文件)
     - name: Run renew script
       env:
