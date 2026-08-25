@@ -105,8 +105,8 @@ def get_new_token():
         "content-type": "application/json",
         "apikey": SUPABASE_ANON_KEY,
         "authorization": f"Bearer {SUPABASE_ANON_KEY}",
-        "origin": "https://new.freemchost.com",
-        "referer": "https://new.freemchost.com/",
+        "origin": "https://freemchost.com",
+        "referer": "https://freemchost.com/",
         "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
     }
 
