@@ -19,7 +19,7 @@ RENEW_ACTION_URL = "https://freemchost.com/_serverFn/798181797bd95a02dee916a26c1
 # 【接口 B】获取最终完整状态的 Detail 路由
 RENEW_DETAIL_URL = "https://freemchost.com/_serverFn/c3a45c08362f2f613bbb6d511a3733a9e85e561709d48bec9280e82a4aa4f47d"
 
-SERVER_ID = "c1487010-5680-43b7-932b-f6b6de2d893c"
+SERVER_ID = "2f12a6bd-a1c1-4cc1-bd32-8becf1925680"
 
 # 4. 消息推送配置（可选，可从 GitHub Secrets 读取，不需要保持 None）
 SCKEY = os.getenv("SCKEY")
