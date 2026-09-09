@@ -52,7 +52,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python renew.py 2>&1 | tee renew.log
 
-# 5. 发送 TG 通知 (仅发送操作结果)
+# 5. 发送 TG 通知 (精准反映实际操作情况)
       - name: Send Telegram Notification
         if: always()
         env:
@@ -65,23 +65,32 @@ jobs:
             exit 0
           fi
 
-          if [ "$RENEW_OUTCOME" = "success" ]; then
-            TITLE="✅ Freemchost 自动续期成功！"
-          elif [ "$RENEW_OUTCOME" = "cancelled" ]; then
-            TITLE="⏰ Freemchost 自动续期超时（已满 3 分钟）！"
+          # 1. 解析日志，提取核心字段
+          SERVER_NAME=$(grep -oP '服务器名称:\s*\K[^\s|]+' renew.log || echo "未知")
+          STATUS=$(grep -oP '状态:\s*\K[^\s|]+' renew.log || echo "未知")
+          EXP_RAW=$(grep -oP '到期时间:\s*\K[^\s]+' renew.log | head -n 1)
+
+          # 格式化 ISO 时间为可读格式 (如 2026-09-13 00:19:04 UTC)
+          if [ -n "$EXP_RAW" ]; then
+            EXP_TIME=$(echo "$EXP_RAW" | sed -E 's/T/ /; s/\.[0-9]+\+00:00/ UTC/')
           else
-            TITLE="❌ Freemchost 自动续期失败！"
+            EXP_TIME="未知"
           fi
 
-          # 仅精准提取日志里的核心结果行
-          INFO_SUMMARY=$(grep -E "服务器名称|当前状态|到期时间" renew.log | sed 's/"//g')
-
-          # 如果完全没匹配到（说明脚本启动即报错），仅提示查看错误，不输出日志原文
-          if [ -z "$INFO_SUMMARY" ]; then
-            INFO_SUMMARY="无法获取续期日志信息，请检查脚本执行日志。"
+          # 2. 根据日志关键字动态判断【真实标题】
+          if [ "$RENEW_OUTCOME" = "cancelled" ]; then
+            TITLE="⏰ Freemchost 运行超时"
+          elif [ "$RENEW_OUTCOME" != "success" ]; then
+            TITLE="❌ Freemchost 执行失败"
+          elif grep -qE "续期成功|成功扩展|Renewed successfully" renew.log; then
+            TITLE="✅ Freemchost 自动续期成功！"
+          else
+            TITLE="ℹ️ Freemchost 服务器状态检查"
           fi
 
-          MSG_TEXT=$(printf "%s\n\n%s" "$TITLE" "$INFO_SUMMARY")
+          # 3. 组合排版整洁的消息文本
+          MSG_TEXT=$(printf "%s\n\n🖥️ 服务器: %s\n📌 当前状态: %s\n⏳ 到期时间: %s" \
+            "$TITLE" "$SERVER_NAME" "$STATUS" "$EXP_TIME")
 
           CLEAN_TOKEN=$(echo "$TG_TOKEN" | xargs)
           CLEAN_ID=$(echo "$TG_ID" | xargs)
