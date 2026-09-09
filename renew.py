@@ -1,8 +1,7 @@
 import os
 import sys
 import time
-from datetime import datetime, timezone
-import json
+from datetime import datetime
 import requests
 
 # ==================== 🔧 核心配置区 ====================
@@ -36,7 +35,7 @@ def notify(title, content):
             log(f"🔔 推送通知失败: {e}")
 
 def parse_action_response(res_json):
-    """解析【接口 A】返回的轻量级压缩包，美化错误信息输出"""
+    """解析【接口 A】返回的轻量级响应，提取结果或错误信息"""
     action_info = {"expires_at": None, "status_code": "未知"}
     try:
         outer_p = res_json.get("p", {})
@@ -72,7 +71,7 @@ def parse_action_response(res_json):
     return action_info
 
 def parse_detail_response(res_json):
-    """解析【接口 B】返回的完整数据包，动态提取服务器元数据"""
+    """解析【接口 B】返回的完整详情包"""
     info = {"name": "未知", "status": "未知", "expires_at": None}
     try:
         outer_v = res_json.get("p", {}).get("v", [])
@@ -94,7 +93,7 @@ def parse_detail_response(res_json):
         if "expires_at" in keys:
             info["expires_at"] = values[keys.index("expires_at")].get("s")
     except Exception as e:
-        log(f"解析最终详情响应异常: {e}")
+        log(f"解析详情响应异常: {e}")
     return info
 
 def get_new_token():
@@ -129,6 +128,16 @@ def get_new_token():
         log(f"💥 登录请求引发异常: {e}")
     return None
 
+def fetch_server_details(headers, payload):
+    """请求【接口 B】提取最新完整服务器状态"""
+    try:
+        res = requests.post(RENEW_DETAIL_URL, headers=headers, json=payload, timeout=15)
+        if res.status_code == 200:
+            return parse_detail_response(res.json())
+    except Exception as e:
+        log(f"⚠️ 拉取服务器详情异常: {e}")
+    return {"name": "未知", "status": "未知", "expires_at": None}
+
 def run_auto_renew():
     log("▶️ 开始全自动登录 + 链式续期确认流程...")
 
@@ -152,31 +161,24 @@ def run_auto_renew():
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
 
-    # 1. 发送【接口 B】预检查服务器当前状态
-    log("🔍 步骤 1/2: 先通过接口 B 检查服务器当前运行状态...")
-    server_name, server_status, expires_at = "未知", "未知", None
-    try:
-        detail_res = requests.post(RENEW_DETAIL_URL, headers=base_headers, json=renew_payload, timeout=15)
-        if detail_res.status_code == 200:
-            server_info = parse_detail_response(detail_res.json())
-            server_name = server_info["name"]
-            server_status = server_info["status"]
-            expires_at = server_info["expires_at"]
-            log(f"📌 当前服务器: {server_name} | 状态: {server_status} | 到期时间: {expires_at}")
-    except Exception as e:
-        log(f"⚠️ 预检查服务器状态时发生非致命异常: {e}")
+    # ----------------------------------------------------
+    # 1. 执行 B：获取续期前的服务器信息
+    # ----------------------------------------------------
+    log("🔍 步骤 1/3: 发送 [接口 B] 获取当前服务器状态与到期时间...")
+    before_info = fetch_server_details(base_headers, renew_payload)
+    log(f"📌 [续期前状态] 服务器: {before_info['name']} | 状态: {before_info['status']} | 到期时间: {before_info['expires_at']}")
 
-    # 2. 发送【接口 A】触发续期动作
-    log("⚡ 步骤 2/2: 正在向后端发送续期指令...")
-    action_info = {"status_code": "未知"}
+    # ----------------------------------------------------
+    # 2. 执行 A：发送续期指令
+    # ----------------------------------------------------
+    log("⚡ 步骤 2/3: 发送 [接口 A] 触发续期动作...")
+    action_info = {"status_code": "未知", "expires_at": None}
     
     for attempt in range(1, 3):
         try:
             action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
             if action_res.status_code == 200:
                 action_info = parse_action_response(action_res.json())
-                if action_info["expires_at"]:
-                    expires_at = action_info["expires_at"]
                 
                 log("    📥 [接口A 返回快照] ----------------------------")
                 log(f"    动作响应提示 : {action_info['status_code']}")
@@ -184,36 +186,48 @@ def run_auto_renew():
                 log("    ------------------------------------------------")
 
                 if "take a moment" in str(action_info["status_code"]).lower() and attempt == 1:
-                    log("⚠️ 收到等待提示（可能尚未到可续期的时间窗口），等待 4 秒后重试一次...")
+                    log("⚠️ 收到等待提示，等待 4 秒后重试第二次...")
                     time.sleep(4)
                     continue
                 break
             else:
                 log(f"❌ 续期动作请求失败，状态码: {action_res.status_code}")
-                notify("服务器自动续期失败", f"续期 Action 接口返回异常状态码: {action_res.status_code}")
+                notify("服务器自动续期失败", f"续期 Action 接口返回状态码: {action_res.status_code}")
                 sys.exit(1)
         except Exception as e:
             log(f"💥 续期动作接口引发异常: {e}")
             notify("服务器自动续期异常", f"Action 阶段异常: {e}")
             sys.exit(1)
 
-    if not expires_at:
+    # ----------------------------------------------------
+    # 3. 再次执行 B：拉取续期后的最终状态进行二次校验
+    # ----------------------------------------------------
+    log("🔍 步骤 3/3: 再次发送 [接口 B] 确认最终更新数据...")
+    after_info = fetch_server_details(base_headers, renew_payload)
+
+    final_name = after_info["name"] if after_info["name"] != "未知" else before_info["name"]
+    final_status = after_info["status"] if after_info["status"] != "未知" else before_info["status"]
+    
+    # 优先采用 A 返回的新时间；若 A 没有，则采用第二次 B 返回的时间；再没有则保留旧时间
+    final_expires_at = action_info["expires_at"] or after_info["expires_at"] or before_info["expires_at"]
+
+    if not final_expires_at:
         err_msg = action_info.get("status_code", "未知错误")
         log(f"🛑 自动续期未能获取到有效的到期时间。服务端提示: {err_msg}")
         notify("服务器自动续期未成功", f"服务端返回提示: {err_msg}")
         sys.exit(1)
 
-    log("🎉【全链路全自动续期/状态获取完成】-----------------------")
-    log(f" 服务器名称: {server_name}")
-    log(f" 当前状态  : {server_status}")
-    log(f" 到期时间  : {expires_at}")
+    log("🎉【全链路全自动续期/确认完成】-----------------------")
+    log(f" 服务器名称: {final_name}")
+    log(f" 当前状态  : {final_status}")
+    log(f" 最新到期时间: {final_expires_at}")
     log("--------------------------------------------------")
     
     notify(
         "服务器状态刷新成功", 
-        f"服务器 [{server_name}]\n"
-        f"当前运行状态：{server_status}\n"
-        f"当前到期时间：{expires_at}"
+        f"服务器 [{final_name}]\n"
+        f"当前状态：{final_status}\n"
+        f"最新到期时间：{final_expires_at}"
     )
 
 if __name__ == "__main__":
