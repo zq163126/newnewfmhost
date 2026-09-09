@@ -52,7 +52,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python renew.py 2>&1 | tee renew.log
 
-      # 5. 发送 TG 通知
+      # 5. 发送 TG 通知 (已消除 Bash 换行报红)
       - name: Send Telegram Notification
         if: always()
         env:
@@ -69,23 +69,18 @@ jobs:
           else
             TITLE="❌ Freemchost 自动续期失败！"
           fi
-          
+
           INFO_SUMMARY=$(grep -E "服务器名称|当前状态|到期时间" renew.log | sed 's/"//g')
-          
+
           if [ -z "$INFO_SUMMARY" ]; then
             INFO_SUMMARY=$(tail -n 5 renew.log | sed 's/"//g')
           fi
-          
-          MSG_TEXT="${TITLE}
 
-  🔗 详情: https://github.com/${REPO}/actions/runs/${RUN_ID}
+          MSG_TEXT=$(printf "%s\n\n🔗 详情: https://github.com/%s/actions/runs/%s\n\n📊 服务器最新状态:\n%s" "$TITLE" "$REPO" "$RUN_ID" "$INFO_SUMMARY")
 
-  📊 服务器最新状态:
-  ${INFO_SUMMARY}"
-          
           curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-            -d "chat_id=${TG_ID}" \
-            -d "text=${MSG_TEXT}"
+            --data-urlencode "chat_id=${TG_ID}" \
+            --data-urlencode "text=${MSG_TEXT}"
 
       # 6. 超时/失败自动触发重新运行 (最多重试 3 次)
       - name: Trigger Retry on Failure or Timeout
