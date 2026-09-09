@@ -1,41 +1,30 @@
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import requests
 
 # ==================== 🔧 核心配置区 ====================
-# 1. 登录配置（完全从 GitHub Secrets 读取，不留任何默认值兜底）
 LOGIN_URL = "https://laehfeigoiycigkfknfn.supabase.co/auth/v1/token?grant_type=password"
 EMAIL = os.getenv("MY_EMAIL")
 PASSWORD = os.getenv("MY_PASSWORD")
-
-# 2. 网页前端固定死公钥（完全从 GitHub Secrets 读取）
 SUPABASE_ANON_KEY = os.getenv("ANON_KEY")
 
-# 3. 路由配置 (2026-06-05 最新双接口链路)
-# 【接口 A】触发续期的 Action 路由
 RENEW_ACTION_URL = "https://freemchost.com/_serverFn/798181797bd95a02dee916a26c18d3539a58152db8660e097ca48d7cdd8ee50c"
-# 【接口 B】获取最终完整状态的 Detail 路由
 RENEW_DETAIL_URL = "https://freemchost.com/_serverFn/c3a45c08362f2f613bbb6d511a3733a9e85e561709d48bec9280e82a4aa4f47d"
 
 SERVER_ID = "0ac36ad6-6dbe-4766-a92e-498d68866539"
-
-# 4. 消息推送配置（可选，可从 GitHub Secrets 读取，不需要保持 None）
 SCKEY = os.getenv("SCKEY")
 
-# 🚨 安全校验：如果必备的环境变量为空，直接中断运行并报错提示，使 GitHub Actions 显式失败
 if not all([EMAIL, PASSWORD, SUPABASE_ANON_KEY]):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] 🛑 错误: 未能在环境中检测到必要的凭证 (MY_EMAIL, MY_PASSWORD 或 ANON_KEY)。", flush=True)
-    print(f"[{now}] 请检查你的 GitHub Repository -> Settings -> Secrets and variables -> Actions 是否配置正确！", flush=True)
     sys.exit(1)
 # =====================================================
 
 def log(message):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 使用 flush=True 并显式刷新，确保通过 | tee 管道传输时也能即时输出日志
     print(f"[{now}] {message}", flush=True)
     sys.stdout.flush()
 
@@ -47,8 +36,8 @@ def notify(title, content):
             log(f"🔔 推送通知失败: {e}")
 
 def parse_action_response(res_json):
-    """解析【接口 A】返回的轻量级压缩包，同时提取最新到期时间、操作状态码"""
-    action_info = {"expires_at": None, "status_code": "未知", "raw_error": None}
+    """解析【接口 A】返回的轻量级压缩包，美化错误信息输出"""
+    action_info = {"expires_at": None, "status_code": "未知"}
     try:
         outer_p = res_json.get("p", {})
         keys = outer_p.get("k", [])
@@ -70,13 +59,12 @@ def parse_action_response(res_json):
             err_idx = keys.index("error")
             if err_idx < len(values):
                 err_val = values[err_idx]
-                action_info["raw_error"] = err_val
                 if isinstance(err_val, dict):
-                    msg_obj = err_val.get("message")
+                    msg_obj = err_val.get("message", {})
                     if isinstance(msg_obj, dict):
-                        action_info["status_code"] = msg_obj.get("s", str(err_val))
+                        action_info["status_code"] = msg_obj.get("s", str(msg_obj))
                     else:
-                        action_info["status_code"] = err_val.get("s", str(err_val))
+                        action_info["status_code"] = str(msg_obj)
                 else:
                     action_info["status_code"] = str(err_val)
     except Exception as e:
@@ -84,7 +72,7 @@ def parse_action_response(res_json):
     return action_info
 
 def parse_detail_response(res_json):
-    """解析【接口 B】返回的完整数据包，动态提取服务器名称、运行状态以及到期时间等元数据"""
+    """解析【接口 B】返回的完整数据包，动态提取服务器元数据"""
     info = {"name": "未知", "status": "未知", "expires_at": None}
     try:
         outer_v = res_json.get("p", {}).get("v", [])
@@ -110,7 +98,6 @@ def parse_detail_response(res_json):
     return info
 
 def get_new_token():
-    """通过模拟登录，动态换取最新的个人专属 Access Token"""
     log("🔑 正在尝试模拟登录以获取个人 Token...")
 
     headers = {
@@ -145,7 +132,6 @@ def get_new_token():
 def run_auto_renew():
     log("▶️ 开始全自动登录 + 链式续期确认流程...")
 
-    # 1. 获取专属 Token
     token = get_new_token()
     if not token:
         log("🛑 未能取得有效 Token，流程被迫中断。")
@@ -166,36 +152,39 @@ def run_auto_renew():
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
 
-    # 1.5 预热阶段：先调用【接口 B】模拟打开页面，防止触发“Please take a moment”规则
-    log("⏱️ 正在请求页面详情进行预热，并模拟页面停留等待 3 秒...")
+    # 1. 发送【接口 B】预检查服务器当前状态
+    log("🔍 步骤 1/2: 先通过接口 B 检查服务器当前运行状态...")
+    server_name, server_status, expires_at = "未知", "未知", None
     try:
-        requests.post(RENEW_DETAIL_URL, headers=base_headers, json=renew_payload, timeout=10)
+        detail_res = requests.post(RENEW_DETAIL_URL, headers=base_headers, json=renew_payload, timeout=15)
+        if detail_res.status_code == 200:
+            server_info = parse_detail_response(detail_res.json())
+            server_name = server_info["name"]
+            server_status = server_info["status"]
+            expires_at = server_info["expires_at"]
+            log(f"📌 当前服务器: {server_name} | 状态: {server_status} | 到期时间: {expires_at}")
     except Exception as e:
-        log(f"⚠️ 预热请求遇到异常（可忽略）: {e}")
-    
-    time.sleep(3)  # 模拟页面停留等待
+        log(f"⚠️ 预检查服务器状态时发生非致命异常: {e}")
 
-    # 2. 发送【接口 A】请求：触发续期动作
-    log("⚡ 步骤 1/2: 正在向后端发送续期指令...")
-    expires_at = None
+    # 2. 发送【接口 A】触发续期动作
+    log("⚡ 步骤 2/2: 正在向后端发送续期指令...")
     action_info = {"status_code": "未知"}
     
-    # 支持最多 2 次重试（用于应对连续拦截）
     for attempt in range(1, 3):
         try:
             action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
             if action_res.status_code == 200:
                 action_info = parse_action_response(action_res.json())
-                expires_at = action_info["expires_at"]
+                if action_info["expires_at"]:
+                    expires_at = action_info["expires_at"]
                 
                 log("    📥 [接口A 返回快照] ----------------------------")
-                log(f"    动作执行状态码 (Error Code) : {action_info['status_code']} (注: 1通常代表无异常)")
-                log(f"    捕获动作到期时间 (Expires At): {expires_at}")
+                log(f"    动作响应提示 : {action_info['status_code']}")
+                log(f"    捕获动作到期时间: {action_info['expires_at']}")
                 log("    ------------------------------------------------")
 
-                # 判断是否触发了需要等待的提示
                 if "take a moment" in str(action_info["status_code"]).lower() and attempt == 1:
-                    log("⚠️ 检测到防刷校验提示，等待 4 秒后尝试第二次发送续期指令...")
+                    log("⚠️ 收到等待提示（可能尚未到可续期的时间窗口），等待 4 秒后重试一次...")
                     time.sleep(4)
                     continue
                 break
@@ -209,44 +198,22 @@ def run_auto_renew():
             sys.exit(1)
 
     if not expires_at:
-        log("⚠️ 接口 A 未能直接返回新到期日期，继续尝试通过接口 B 拉取最新详情...")
-
-    # 3. 发送【接口 B】请求：拉取续期后的最终详情状态
-    log("🔍 步骤 2/2: 正在拉取最终服务器完整状态确认...")
-    server_name = "未知"
-    server_status = "未知"
-    try:
-        detail_res = requests.post(RENEW_DETAIL_URL, headers=base_headers, json=renew_payload, timeout=15)
-        if detail_res.status_code == 200:
-            server_info = parse_detail_response(detail_res.json())
-            server_name = server_info["name"]
-            server_status = server_info["status"]
-            if not expires_at and server_info["expires_at"]:
-                expires_at = server_info["expires_at"]
-        else:
-            log(f"⚠️ 详情刷新接口返回状态码 {detail_res.status_code}，将使用原缺省值打印日志。")
-    except Exception as e:
-        log(f"⚠️ 刷新最终详情时发生非致命异常: {e}")
-
-    # 判断两边接口是否都未能获取到有效到期时间
-    if not expires_at:
         err_msg = action_info.get("status_code", "未知错误")
-        log(f"🛑 自动续期未能成功完成。服务端返回提示: {err_msg}")
-        notify("服务器自动续期未成功", f"服务端返回提示: {err_msg}\n请确认是否已达到最大续期时长或触发冷冻期。")
+        log(f"🛑 自动续期未能获取到有效的到期时间。服务端提示: {err_msg}")
+        notify("服务器自动续期未成功", f"服务端返回提示: {err_msg}")
         sys.exit(1)
 
-    # 4. 打印最终完美闭环结果并推送
-    log("🎉【全链路全自动续期成功】-----------------------")
+    log("🎉【全链路全自动续期/状态获取完成】-----------------------")
     log(f" 服务器名称: {server_name}")
     log(f" 当前状态  : {server_status}")
-    log(f" 新到期时间: {expires_at}")
+    log(f" 到期时间  : {expires_at}")
     log("--------------------------------------------------")
     
     notify(
-        "服务器自动续期成功", 
-        f"服务器 [{server_name}] 续期成功！\n"
+        "服务器状态刷新成功", 
+        f"服务器 [{server_name}]\n"
         f"当前运行状态：{server_status}\n"
-        f"最新到期时间：{expires_at}"
+        f"当前到期时间：{expires_at}"
     )
 
 if __name__ == "__main__":
