@@ -28,14 +28,16 @@ SCKEY = os.getenv("SCKEY")
 # 🚨 安全校验：如果必备的环境变量为空，直接中断运行并报错提示，使 GitHub Actions 显式失败
 if not all([EMAIL, PASSWORD, SUPABASE_ANON_KEY]):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] 🛑 错误: 未能在环境中检测到必要的凭证 (MY_EMAIL, MY_PASSWORD 或 ANON_KEY)。")
-    print(f"[{now}] 请检查你的 GitHub Repository -> Settings -> Secrets and variables -> Actions 是否配置正确！")
+    print(f"[{now}] 🛑 错误: 未能在环境中检测到必要的凭证 (MY_EMAIL, MY_PASSWORD 或 ANON_KEY)。", flush=True)
+    print(f"[{now}] 请检查你的 GitHub Repository -> Settings -> Secrets and variables -> Actions 是否配置正确！", flush=True)
     sys.exit(1)
 # =====================================================
 
 def log(message):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] {message}")
+    # 使用 flush=True 并显式刷新，确保通过 | tee 管道传输时也能即时输出日志
+    print(f"[{now}] {message}", flush=True)
+    sys.stdout.flush()
 
 def notify(title, content):
     if SCKEY:
