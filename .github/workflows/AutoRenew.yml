@@ -52,7 +52,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python renew.py 2>&1 | tee renew.log
 
-# 5. 发送 TG 通知 (精准反映实际操作情况)
+# 5. 发送 TG 通知 (带剩余天数倒计时)
       - name: Send Telegram Notification
         if: always()
         env:
@@ -70,14 +70,32 @@ jobs:
           STATUS=$(grep -oP '状态:\s*\K[^\s|]+' renew.log || echo "未知")
           EXP_RAW=$(grep -oP '到期时间:\s*\K[^\s]+' renew.log | head -n 1)
 
-          # 格式化 ISO 时间为可读格式 (如 2026-09-13 00:19:04 UTC)
+          # 2. 格式化 ISO 时间并计算剩余天数
           if [ -n "$EXP_RAW" ]; then
             EXP_TIME=$(echo "$EXP_RAW" | sed -E 's/T/ /; s/\.[0-9]+\+00:00/ UTC/')
+            
+            # 将到期时间和当前时间转为 Unix 时间戳 (秒)
+            EXP_STAMP=$(date -d "$EXP_RAW" +%s 2>/dev/null || echo 0)
+            NOW_STAMP=$(date +%s)
+            
+            if [ "$EXP_STAMP" -gt 0 ]; then
+              DIFF_SEC=$((EXP_STAMP - NOW_STAMP))
+              # 向上取整计算天数 (不足1天按1天算，小于等于0即已过期)
+              if [ "$DIFF_SEC" -gt 0 ]; then
+                DAYS_LEFT=$(( (DIFF_SEC + 86399) / 86400 ))
+                DAYS_STR=" (还有 ${DAYS_LEFT} 天)"
+              else
+                DAYS_STR=" (已到期)"
+              fi
+            else
+              DAYS_STR=""
+            fi
           else
             EXP_TIME="未知"
+            DAYS_STR=""
           fi
 
-          # 2. 根据日志关键字动态判断【真实标题】
+          # 3. 根据日志关键字动态判断【真实标题】
           if [ "$RENEW_OUTCOME" = "cancelled" ]; then
             TITLE="⏰ Freemchost 运行超时"
           elif [ "$RENEW_OUTCOME" != "success" ]; then
@@ -88,9 +106,9 @@ jobs:
             TITLE="ℹ️ Freemchost 服务器状态检查"
           fi
 
-          # 3. 组合排版整洁的消息文本
-          MSG_TEXT=$(printf "%s\n\n🖥️ 服务器: %s\n📌 当前状态: %s\n⏳ 到期时间: %s" \
-            "$TITLE" "$SERVER_NAME" "$STATUS" "$EXP_TIME")
+          # 4. 组合排版文本
+          MSG_TEXT=$(printf "%s\n\n🖥️ 服务器: %s\n📌 当前状态: %s\n⏳ 到期时间: %s%s" \
+            "$TITLE" "$SERVER_NAME" "$STATUS" "$EXP_TIME" "$DAYS_STR")
 
           CLEAN_TOKEN=$(echo "$TG_TOKEN" | xargs)
           CLEAN_ID=$(echo "$TG_ID" | xargs)
