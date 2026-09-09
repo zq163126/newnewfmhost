@@ -1,0 +1,106 @@
+name: Server Auto Renew
+
+on:
+#  schedule:
+#    - cron: '37 6 * * *' # 每天北京时间 14:37 自动运行
+  workflow_dispatch:
+    inputs:
+      retry_count:
+        description: '自动重试次数'
+        required: false
+        default: '0'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  renew_job:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 下载仓库代码
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      # 2. 安装 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3. 安装依赖库
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Enable WARP Network
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+
+      # 4. 运行续期脚本 (限制 3 分钟超时)
+      - name: Run renew script
+        id: renew
+        timeout-minutes: 3
+        env:
+          MY_EMAIL: ${{ secrets.MY_EMAIL }}
+          MY_PASSWORD: ${{ secrets.MY_PASSWORD }}
+          ANON_KEY: ${{ secrets.ANON_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: python renew.py 2>&1 | tee renew.log
+
+      # 5. 发送 TG 通知
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TG_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ID: ${{ secrets.TG_USER_ID }}
+          RENEW_OUTCOME: ${{ steps.renew.outcome }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$RENEW_OUTCOME" = "success" ]; then
+            TITLE="✅ Freemchost 自动续期成功！"
+          elif [ "$RENEW_OUTCOME" = "cancelled" ]; then
+            TITLE="⏰ Freemchost 自动续期超时（已满 3 分钟）！"
+          else
+            TITLE="❌ Freemchost 自动续期失败！"
+          fi
+          
+          INFO_SUMMARY=$(grep -E "服务器名称|当前状态|到期时间" renew.log | sed 's/"//g')
+          
+          if [ -z "$INFO_SUMMARY" ]; then
+            INFO_SUMMARY=$(tail -n 5 renew.log | sed 's/"//g')
+          fi
+          
+          MSG_TEXT="${TITLE}
+
+  🔗 详情: https://github.com/${REPO}/actions/runs/${RUN_ID}
+
+  📊 服务器最新状态:
+  ${INFO_SUMMARY}"
+          
+          curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            -d "chat_id=${TG_ID}" \
+            -d "text=${MSG_TEXT}"
+
+      # 6. 超时/失败自动触发重新运行 (最多重试 3 次)
+      - name: Trigger Retry on Failure or Timeout
+        if: failure() || cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAX_RETRIES: 3
+          CURRENT_RETRY: ${{ inputs.retry_count }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: |
+          RETRY_VAL="${CURRENT_RETRY:-0}"
+          NEXT_RETRY=$((RETRY_VAL + 1))
+          if [ "$NEXT_RETRY" -le "$MAX_RETRIES" ]; then
+            echo "⚠️ 脚本执行超时或失败，正在自动发起第 $NEXT_RETRY 次重试..."
+            gh workflow run "$WORKFLOW_NAME" -f retry_count="$NEXT_RETRY"
+          else
+            echo "🛑 已达到最大重试次数 ($MAX_RETRIES)，不再自动触发重新运行。"
+          fi
