@@ -52,7 +52,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python renew.py 2>&1 | tee renew.log
 
-# 5. 发送 TG 通知 (带剩余天数倒计时)
+# 5. 发送 TG 通知 (精确计算剩余天数 - 向上取整)
       - name: Send Telegram Notification
         if: always()
         env:
@@ -70,23 +70,22 @@ jobs:
           STATUS=$(grep -oP '状态:\s*\K[^\s|]+' renew.log || echo "未知")
           EXP_RAW=$(grep -oP '到期时间:\s*\K[^\s]+' renew.log | head -n 1)
 
-          # 2. 格式化 ISO 时间并计算剩余天数
+          # 2. 格式化 ISO 时间并精准计算剩余天数
           if [ -n "$EXP_RAW" ]; then
             EXP_TIME=$(echo "$EXP_RAW" | sed -E 's/T/ /; s/\.[0-9]+\+00:00/ UTC/')
             
-            # 将到期时间和当前时间转为 Unix 时间戳 (秒)
+            # 统一转换为秒级 Unix 时间戳进行精确计算
             EXP_STAMP=$(date -d "$EXP_RAW" +%s 2>/dev/null || echo 0)
             NOW_STAMP=$(date +%s)
             
-            if [ "$EXP_STAMP" -gt 0 ]; then
+            if [ "$EXP_STAMP" -gt "$NOW_STAMP" ]; then
               DIFF_SEC=$((EXP_STAMP - NOW_STAMP))
-              # 向上取整计算天数 (不足1天按1天算，小于等于0即已过期)
-              if [ "$DIFF_SEC" -gt 0 ]; then
-                DAYS_LEFT=$(( (DIFF_SEC + 86399) / 86400 ))
-                DAYS_STR=" (还有 ${DAYS_LEFT} 天)"
-              else
-                DAYS_STR=" (已到期)"
-              fi
+              # 86400 秒 = 1 天。用 (DIFF_SEC + 86399) / 86400 实现精准向上取整
+              # 例如：剩 3d 18h (323688 秒) -> (323688 + 86399) / 86400 = 4 天
+              DAYS_LEFT=$(( (DIFF_SEC + 86399) / 86400 ))
+              DAYS_STR=" (还有 ${DAYS_LEFT} 天)"
+            elif [ "$EXP_STAMP" -gt 0 ]; then
+              DAYS_STR=" (今日到期)"
             else
               DAYS_STR=""
             fi
@@ -95,7 +94,7 @@ jobs:
             DAYS_STR=""
           fi
 
-          # 3. 根据日志关键字动态判断【真实标题】
+          # 3. 动态判断标题
           if [ "$RENEW_OUTCOME" = "cancelled" ]; then
             TITLE="⏰ Freemchost 运行超时"
           elif [ "$RENEW_OUTCOME" != "success" ]; then
