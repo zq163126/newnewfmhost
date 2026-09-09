@@ -52,16 +52,19 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python renew.py 2>&1 | tee renew.log
 
-      # 5. 发送 TG 通知 (已消除 Bash 换行报红)
+# 5. 发送 TG 通知 (仅发送操作结果)
       - name: Send Telegram Notification
         if: always()
         env:
           TG_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ID: ${{ secrets.TG_USER_ID }}
           RENEW_OUTCOME: ${{ steps.renew.outcome }}
-          RUN_ID: ${{ github.run_id }}
-          REPO: ${{ github.repository }}
         run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_ID" ]; then
+            echo "⚠️ 未配置 TG_BOT_TOKEN 或 TG_USER_ID，跳过 Telegram 通知发送。"
+            exit 0
+          fi
+
           if [ "$RENEW_OUTCOME" = "success" ]; then
             TITLE="✅ Freemchost 自动续期成功！"
           elif [ "$RENEW_OUTCOME" = "cancelled" ]; then
@@ -70,16 +73,21 @@ jobs:
             TITLE="❌ Freemchost 自动续期失败！"
           fi
 
+          # 仅精准提取日志里的核心结果行
           INFO_SUMMARY=$(grep -E "服务器名称|当前状态|到期时间" renew.log | sed 's/"//g')
 
+          # 如果完全没匹配到（说明脚本启动即报错），仅提示查看错误，不输出日志原文
           if [ -z "$INFO_SUMMARY" ]; then
-            INFO_SUMMARY=$(tail -n 5 renew.log | sed 's/"//g')
+            INFO_SUMMARY="无法获取续期日志信息，请检查脚本执行日志。"
           fi
 
-          MSG_TEXT=$(printf "%s\n\n🔗 详情: https://github.com/%s/actions/runs/%s\n\n📊 服务器最新状态:\n%s" "$TITLE" "$REPO" "$RUN_ID" "$INFO_SUMMARY")
+          MSG_TEXT=$(printf "%s\n\n%s" "$TITLE" "$INFO_SUMMARY")
 
-          curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TG_ID}" \
+          CLEAN_TOKEN=$(echo "$TG_TOKEN" | xargs)
+          CLEAN_ID=$(echo "$TG_ID" | xargs)
+
+          curl -s -X POST "https://api.telegram.org/bot${CLEAN_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CLEAN_ID}" \
             --data-urlencode "text=${MSG_TEXT}"
 
       # 6. 超时/失败自动触发重新运行 (最多重试 3 次)
