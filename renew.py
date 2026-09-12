@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import re
 from datetime import datetime, timezone
 import requests
 
@@ -17,7 +16,7 @@ RENEW_DETAIL_URL = "https://freemchost.com/_serverFn/c3a45c08362f2f613bbb6d511a3
 SERVER_ID = "0ac36ad6-6dbe-4766-a92e-498d68866539"
 SCKEY = os.getenv("SCKEY")
 
-# 允许续期的阈值天数（低于或等于此天数时触发续期动作）
+# 允许续期的阈值天数（低于或等于此天数时触发续期 A 动作）
 RENEW_THRESHOLD_DAYS = 2.0
 
 if not all([EMAIL, PASSWORD, SUPABASE_ANON_KEY]):
@@ -48,7 +47,7 @@ def parse_iso_datetime(dt_str):
         return None
 
 def parse_action_response(res_json):
-    action_info = {"expires_at": None, "status_code": "成功"}
+    action_info = {"expires_at": None, "status_code": "未知"}
     try:
         if isinstance(res_json, dict):
             outer_p = res_json.get("p", {})
@@ -83,52 +82,32 @@ def parse_action_response(res_json):
         log(f"解析续期动作响应异常: {e}")
     return action_info
 
-def parse_detail_response(res_json, raw_text=""):
+def parse_detail_response(res_json):
     info = {"name": "未知", "status": "未知", "expires_at": None}
-    
-    # 1. 尝试结构化 JSON 提取
     try:
-        if isinstance(res_json, dict):
-            outer_v = res_json.get("p", {}).get("v", [])
-            
-            def extract_from_node(node):
-                if not isinstance(node, dict):
-                    return
-                p_obj = node.get("p", {})
-                keys = p_obj.get("k", [])
-                values = p_obj.get("v", [])
-                
-                for idx, key in enumerate(keys):
-                    if idx < len(values):
-                        val_obj = values[idx]
-                        if key == "name" and isinstance(val_obj, dict):
-                            info["name"] = val_obj.get("s", info["name"])
-                        elif key == "status" and isinstance(val_obj, dict):
-                            info["status"] = val_obj.get("s", info["status"])
-                        elif key == "expires_at" and isinstance(val_obj, dict):
-                            info["expires_at"] = val_obj.get("s", info["expires_at"])
-                        elif isinstance(val_obj, dict):
-                            extract_from_node(val_obj)
+        if not isinstance(res_json, dict):
+            return info
 
-            for v_item in outer_v:
-                extract_from_node(v_item)
+        outer_v = res_json.get("p", {}).get("v", [])
+        if not outer_v:
+            return info
+
+        mid_v = outer_v[0].get("p", {}).get("v", [])
+        if not mid_v:
+            return info
+
+        server_node = mid_v[0]
+        keys = server_node.get("p", {}).get("k", [])
+        values = server_node.get("p", {}).get("v", [])
+
+        if "name" in keys:
+            info["name"] = values[keys.index("name")].get("s", "未知")
+        if "status" in keys:
+            info["status"] = values[keys.index("status")].get("s", "未知")
+        if "expires_at" in keys:
+            info["expires_at"] = values[keys.index("expires_at")].get("s")
     except Exception as e:
-        log(f"JSON结构化提取出现异常: {e}")
-
-    # 2. 回退机制：若 JSON 解析未抓取到 expires_at，改用字符串正则盲抓
-    if not info["expires_at"] and raw_text:
-        match_exp = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z', raw_text)
-        if match_exp:
-            info["expires_at"] = match_exp.group(0)
-
-        match_name = re.search(r'"name"\s*:\s*\{\s*"t"\s*:\s*\d+,\s*"s"\s*:\s*"([^"]+)"', raw_text)
-        if match_name:
-            info["name"] = match_name.group(1)
-
-        match_status = re.search(r'"status"\s*:\s*\{\s*"t"\s*:\s*\d+,\s*"s"\s*:\s*"([^"]+)"', raw_text)
-        if match_status:
-            info["status"] = match_status.group(1)
-
+        log(f"解析详情响应异常: {e}")
     return info
 
 def get_new_token():
@@ -167,19 +146,7 @@ def fetch_server_details(session_headers, payload):
     try:
         res = requests.post(RENEW_DETAIL_URL, headers=session_headers, json=payload, timeout=15)
         if res.status_code == 200:
-            raw_text = res.text
-            try:
-                res_json = res.json()
-            except Exception:
-                res_json = {}
-            
-            parsed_info = parse_detail_response(res_json, raw_text)
-            # 如果依然拿不到，输出响应以供排除调试
-            if not parsed_info["expires_at"]:
-                log(f"⚠️ [接口 B 原始文本] {raw_text}")
-            return parsed_info
-        else:
-            log(f"⚠️ [接口 B] 请求异常，状态码: {res.status_code}, 返回: {res.text}")
+            return parse_detail_response(res.json())
     except Exception as e:
         log(f"⚠️ 拉取服务器详情异常: {e}")
     return {"name": "未知", "status": "未知", "expires_at": None}
@@ -203,7 +170,7 @@ def run_auto_renew():
         "x-tsr-serverfn": "true"
     }
 
-    # 接口 Payload 请求体
+    # 接口 B（详情查询）专用 Payload - 必须用 serverId
     detail_payload = {
         "t": {
             "t": 10,
@@ -227,6 +194,7 @@ def run_auto_renew():
         "m": []
     }
 
+    # 接口 A（续期动作）专用 Payload - 使用 id
     action_payload = {
         "t": {
             "t": 10,
@@ -280,7 +248,7 @@ def run_auto_renew():
     else:
         log("⚠️ 无法精确计算剩余天数，默认触发续期指令...")
 
-    # ⏳ 模拟点击延迟
+    # ⏳ 在接口 B 和 接口 A 之间加入 3 秒休眠，模拟真实页面浏览间隔
     log("⏳ 正在模拟人类浏览页面，等待 3 秒后点击续期按钮...")
     time.sleep(3)
 
@@ -288,21 +256,17 @@ def run_auto_renew():
     # 步骤 2: 发送 [接口 A] 触发续期动作
     # ----------------------------------------------------
     log("⚡ 步骤 2: 发送 [接口 A] 触发续期动作...")
-    action_info = {"status_code": "成功", "expires_at": None}
+    action_info = {"status_code": "未知", "expires_at": None}
     
     try:
         action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=action_payload, timeout=15)
         if action_res.status_code == 200:
-            try:
-                res_json = action_res.json()
-                action_info = parse_action_response(res_json)
-            except Exception:
-                pass
+            res_json = action_res.json()
+            action_info = parse_action_response(res_json)
             
             log("    📥 [接口 A 返回快照] ----------------------------")
-            log(f"    动作响应状态 : {action_info['status_code']}")
-            if action_info['expires_at']:
-                log(f"    捕获动作到期时间: {action_info['expires_at']}")
+            log(f"    动作响应提示 : {action_info['status_code']}")
+            log(f"    捕获动作到期时间: {action_info['expires_at']}")
             log("    ------------------------------------------------")
         else:
             log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}")
@@ -314,9 +278,8 @@ def run_auto_renew():
         sys.exit(1)
 
     # ----------------------------------------------------
-    # 步骤 3: 再次请求 [接口 B] 确认续期后的最新数据
+    # 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据
     # ----------------------------------------------------
-    time.sleep(2)
     log("🔍 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据...")
     after_info = fetch_server_details(base_headers, detail_payload)
 
@@ -330,7 +293,7 @@ def run_auto_renew():
     log(f" 续期前到期时间: {expires_at_str}")
     log(f" 续期后到期时间: {final_expires_at}")
     
-    if final_expires_at and expires_at_str and final_expires_at != expires_at_str:
+    if final_expires_at != expires_at_str:
         log(" ✅ 状态判定: 成功延长续期！")
         notify(
             "服务器自动续期成功", 
@@ -339,7 +302,7 @@ def run_auto_renew():
             f"最新到期时间：{final_expires_at}"
         )
     else:
-        err_msg = action_info.get("status_code", "时间未刷新")
+        err_msg = action_info.get("status_code", "时间无变化")
         log(f" ⚠️ 状态判定: 到期时间未发生变动 (服务端响应: {err_msg})")
         notify(
             "服务器续期状态通知", 
