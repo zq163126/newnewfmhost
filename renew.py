@@ -49,14 +49,28 @@ def parse_iso_datetime(dt_str):
         return None
 
 def extract_message_string(obj):
-    """递归提取嵌套结构中的字符串消息"""
+    """递归穿透任意深度的字典/列表提取字符串"""
     if isinstance(obj, str):
         return obj
     if isinstance(obj, dict):
-        if "s" in obj and isinstance(obj["s"], str):
-            return obj["s"]
+        # 优先提取特定结构中的字符串
+        if "s" in obj:
+            res = extract_message_string(obj["s"])
+            if res and isinstance(res, str) and not res.startswith("{"):
+                return res
         if "message" in obj:
-            return extract_message_string(obj["message"])
+            res = extract_message_string(obj["message"])
+            if res:
+                return res
+        for v in obj.values():
+            res = extract_message_string(v)
+            if res and isinstance(res, str) and len(res) > 0 and not res.startswith("{"):
+                return res
+    if isinstance(obj, list):
+        for item in obj:
+            res = extract_message_string(item)
+            if res:
+                return res
     return str(obj)
 
 def parse_action_response(res_json):
@@ -282,7 +296,6 @@ def run_auto_renew():
     # 步骤 3: 再次发送 [接口 B] 二次校验最终结果
     # ----------------------------------------------------
     log("🔍 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据...")
-    # 额外等待 1 秒，确保后端数据库异步事务提交完毕
     time.sleep(1)
     after_info = fetch_server_details(base_headers, detail_payload)
 
