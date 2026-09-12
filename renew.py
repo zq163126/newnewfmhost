@@ -38,56 +38,56 @@ def notify(title, content):
             log(f"🔔 推送通知失败: {e}")
 
 def parse_iso_datetime(dt_str):
+    """将 ISO 8601 字符串解析为 UTC datetime 对象"""
     if not dt_str:
         return None
     try:
+        # 兼容 ISO 格式中的 Z 或 +00:00
         clean_str = dt_str.replace("Z", "+00:00")
         return datetime.fromisoformat(clean_str)
     except Exception:
         return None
 
 def parse_action_response(res_json):
+    """解析【接口 A】返回的轻量级响应"""
     action_info = {"expires_at": None, "status_code": "未知"}
     try:
-        if isinstance(res_json, dict):
-            outer_p = res_json.get("p", {})
-            keys = outer_p.get("k", [])
-            values = outer_p.get("v", [])
+        outer_p = res_json.get("p", {})
+        keys = outer_p.get("k", [])
+        values = outer_p.get("v", [])
 
-            if "result" in keys:
-                idx = keys.index("result")
-                if idx < len(values):
-                    result_node_p = values[idx].get("p", {})
-                    sub_keys = result_node_p.get("k", [])
-                    sub_values = result_node_p.get("v", [])
+        if "result" in keys:
+            idx = keys.index("result")
+            if idx < len(values):
+                result_node_p = values[idx].get("p", {})
+                sub_keys = result_node_p.get("k", [])
+                sub_values = result_node_p.get("v", [])
 
-                    if "expires_at" in sub_keys:
-                        sub_idx = sub_keys.index("expires_at")
-                        if sub_idx < len(sub_values):
-                            action_info["expires_at"] = sub_values[sub_idx].get("s")
-            
-            if "error" in keys:
-                err_idx = keys.index("error")
-                if err_idx < len(values):
-                    err_val = values[err_idx]
-                    if isinstance(err_val, dict):
-                        msg_obj = err_val.get("message", {})
-                        if isinstance(msg_obj, dict):
-                            action_info["status_code"] = msg_obj.get("s", str(msg_obj))
-                        else:
-                            action_info["status_code"] = str(msg_obj)
+                if "expires_at" in sub_keys:
+                    sub_idx = sub_keys.index("expires_at")
+                    if sub_idx < len(sub_values):
+                        action_info["expires_at"] = sub_values[sub_idx].get("s")
+        
+        if "error" in keys:
+            err_idx = keys.index("error")
+            if err_idx < len(values):
+                err_val = values[err_idx]
+                if isinstance(err_val, dict):
+                    msg_obj = err_val.get("message", {})
+                    if isinstance(msg_obj, dict):
+                        action_info["status_code"] = msg_obj.get("s", str(msg_obj))
                     else:
-                        action_info["status_code"] = str(err_val)
+                        action_info["status_code"] = str(msg_obj)
+                else:
+                    action_info["status_code"] = str(err_val)
     except Exception as e:
         log(f"解析续期动作响应异常: {e}")
     return action_info
 
 def parse_detail_response(res_json):
+    """解析【接口 B】返回的完整详情包"""
     info = {"name": "未知", "status": "未知", "expires_at": None}
     try:
-        if not isinstance(res_json, dict):
-            return info
-
         outer_v = res_json.get("p", {}).get("v", [])
         if not outer_v:
             return info
@@ -142,9 +142,10 @@ def get_new_token():
         log(f"💥 登录请求引发异常: {e}")
     return None
 
-def fetch_server_details(session_headers, payload):
+def fetch_server_details(headers, payload):
+    """请求【接口 B】提取最新完整服务器状态"""
     try:
-        res = requests.post(RENEW_DETAIL_URL, headers=session_headers, json=payload, timeout=15)
+        res = requests.post(RENEW_DETAIL_URL, headers=headers, json=payload, timeout=15)
         if res.status_code == 200:
             return parse_detail_response(res.json())
     except Exception as e:
@@ -170,59 +171,15 @@ def run_auto_renew():
         "x-tsr-serverfn": "true"
     }
 
-    # 接口 B（详情查询）专用 Payload - 必须用 serverId
-    detail_payload = {
-        "t": {
-            "t": 10,
-            "i": 0,
-            "p": {
-                "k": ["data"],
-                "v": [
-                    {
-                        "t": 10,
-                        "i": 1,
-                        "p": {
-                            "k": ["serverId"],
-                            "v": [{"t": 1, "s": SERVER_ID}]
-                        },
-                        "o": 0
-                    }
-                ]
-            }
-        },
-        "f": 63,
-        "m": []
-    }
-
-    # 接口 A（续期动作）专用 Payload - 使用 id
-    action_payload = {
-        "t": {
-            "t": 10,
-            "i": 0,
-            "p": {
-                "k": ["data"],
-                "v": [
-                    {
-                        "t": 10,
-                        "i": 1,
-                        "p": {
-                            "k": ["id"],
-                            "v": [{"t": 1, "s": SERVER_ID}]
-                        },
-                        "o": 0
-                    }
-                ]
-            }
-        },
-        "f": 63,
-        "m": []
+    renew_payload = {
+        "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
 
     # ----------------------------------------------------
-    # 步骤 1: 请求 [接口 B] 初始化上下文并预查服务器状态
+    # 步骤 1: 发送 [接口 B] 预检查服务器状态与剩余时间
     # ----------------------------------------------------
-    log("🔍 步骤 1: 请求 [接口 B] 加载页面上下文并校验服务器到期时间...")
-    before_info = fetch_server_details(base_headers, detail_payload)
+    log("🔍 步骤 1: 请求 [接口 B] 校验服务器状态及到期时间...")
+    before_info = fetch_server_details(base_headers, renew_payload)
     
     server_name = before_info["name"]
     server_status = before_info["status"]
@@ -233,6 +190,7 @@ def run_auto_renew():
     expire_dt = parse_iso_datetime(expires_at_str)
     now_utc = datetime.now(timezone.utc)
 
+    # 校验是否未进入续期时间窗口
     if expire_dt:
         time_left = expire_dt - now_utc
         days_left = time_left.total_seconds() / 86400.0
@@ -240,17 +198,17 @@ def run_auto_renew():
         if days_left > RENEW_THRESHOLD_DAYS:
             log("--------------------------------------------------")
             log(f"💡 评估结果: 暂无需续期 (距到期仍有 {days_left:.1f} 天，未进入 <={RENEW_THRESHOLD_DAYS} 天续期窗口)")
+            log(f"📌 当前状态: 良好 ({server_status})")
             log(f"📌 当前到期时间: {expires_at_str}")
+            log(f"⏰ 建议下次检查/续期时间: 到期前 1-2 天")
             log("--------------------------------------------------")
+            
+            # 安全平滑退出，不触发后续接口 A
             sys.exit(0)
         else:
             log(f"⚠️ 评估结果: 已进入续期窗口 (剩余 {days_left:.1f} 天 <= {RENEW_THRESHOLD_DAYS} 天)，准备发送续期指令...")
     else:
-        log("⚠️ 无法精确计算剩余天数，默认触发续期指令...")
-
-    # ⏳ 在接口 B 和 接口 A 之间加入 3 秒休眠，模拟真实页面浏览间隔
-    log("⏳ 正在模拟人类浏览页面，等待 3 秒后点击续期按钮...")
-    time.sleep(3)
+        log("⚠️ 无法精确计算剩余天数，默认触发续期指令以确保安全...")
 
     # ----------------------------------------------------
     # 步骤 2: 发送 [接口 A] 触发续期动作
@@ -258,30 +216,36 @@ def run_auto_renew():
     log("⚡ 步骤 2: 发送 [接口 A] 触发续期动作...")
     action_info = {"status_code": "未知", "expires_at": None}
     
-    try:
-        action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=action_payload, timeout=15)
-        if action_res.status_code == 200:
-            res_json = action_res.json()
-            action_info = parse_action_response(res_json)
-            
-            log("    📥 [接口 A 返回快照] ----------------------------")
-            log(f"    动作响应提示 : {action_info['status_code']}")
-            log(f"    捕获动作到期时间: {action_info['expires_at']}")
-            log("    ------------------------------------------------")
-        else:
-            log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}")
-            notify("服务器自动续期失败", f"续期 Action 接口返回状态码: {action_res.status_code}")
+    for attempt in range(1, 3):
+        try:
+            action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
+            if action_res.status_code == 200:
+                action_info = parse_action_response(action_res.json())
+                
+                log("    📥 [接口A 返回快照] ----------------------------")
+                log(f"    动作响应提示 : {action_info['status_code']}")
+                log(f"    捕获动作到期时间: {action_info['expires_at']}")
+                log("    ------------------------------------------------")
+
+                if "take a moment" in str(action_info["status_code"]).lower() and attempt == 1:
+                    log("⚠️ 收到频繁操作提示，等待 4 秒后重试...")
+                    time.sleep(4)
+                    continue
+                break
+            else:
+                log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}")
+                notify("服务器自动续期失败", f"续期 Action 接口返回状态码: {action_res.status_code}")
+                sys.exit(1)
+        except Exception as e:
+            log(f"💥 续期动作接口异常: {e}")
+            notify("服务器自动续期异常", f"Action 阶段异常: {e}")
             sys.exit(1)
-    except Exception as e:
-        log(f"💥 续期动作接口异常: {e}")
-        notify("服务器自动续期异常", f"Action 阶段异常: {e}")
-        sys.exit(1)
 
     # ----------------------------------------------------
-    # 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据
+    # 步骤 3: 再次发送 [接口 B] 二次校验最终结果
     # ----------------------------------------------------
     log("🔍 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据...")
-    after_info = fetch_server_details(base_headers, detail_payload)
+    after_info = fetch_server_details(base_headers, renew_payload)
 
     final_name = after_info["name"] if after_info["name"] != "未知" else server_name
     final_status = after_info["status"] if after_info["status"] != "未知" else server_status
@@ -293,6 +257,7 @@ def run_auto_renew():
     log(f" 续期前到期时间: {expires_at_str}")
     log(f" 续期后到期时间: {final_expires_at}")
     
+    # 判断时间是否确实发生了改变
     if final_expires_at != expires_at_str:
         log(" ✅ 状态判定: 成功延长续期！")
         notify(
