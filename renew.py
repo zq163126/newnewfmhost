@@ -48,6 +48,17 @@ def parse_iso_datetime(dt_str):
     except Exception:
         return None
 
+def extract_message_string(obj):
+    """递归提取嵌套结构中的字符串消息"""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, dict):
+        if "s" in obj and isinstance(obj["s"], str):
+            return obj["s"]
+        if "message" in obj:
+            return extract_message_string(obj["message"])
+    return str(obj)
+
 def parse_action_response(res_json):
     """解析【接口 A】返回的响应"""
     action_info = {"expires_at": None, "status_code": "无有效数据返回"}
@@ -59,7 +70,7 @@ def parse_action_response(res_json):
         keys = outer_p.get("k", [])
         values = outer_p.get("v", [])
 
-        # 解析成功结果
+        # 1. 尝试解析成功节点
         if "result" in keys:
             idx = keys.index("result")
             if idx < len(values):
@@ -72,29 +83,15 @@ def parse_action_response(res_json):
                     if sub_idx < len(sub_values):
                         action_info["expires_at"] = sub_values[sub_idx].get("s")
                         action_info["status_code"] = "成功触发"
-        
-        # 解析错误响应
+
+        # 2. 尝试解析错误节点
         if "error" in keys:
             err_idx = keys.index("error")
             if err_idx < len(values):
                 err_val = values[err_idx]
-                if isinstance(err_val, dict):
-                    msg_obj = err_val.get("s", "")
-                    if not msg_obj:
-                        msg_obj = err_val.get("message", {}).get("s", "")
-                    
-                    # 尝试解析 JSON 格式的错误信息
-                    try:
-                        parsed_msg = json.loads(msg_obj)
-                        if isinstance(parsed_msg, list) and len(parsed_msg) > 0:
-                            first_err = parsed_msg[0]
-                            action_info["status_code"] = f"校验错误: {first_err.get('message')} ({first_err.get('code')})"
-                        else:
-                            action_info["status_code"] = str(msg_obj)
-                    except Exception:
-                        action_info["status_code"] = str(msg_obj) if msg_obj else str(err_val)
-                else:
-                    action_info["status_code"] = str(err_val)
+                msg_str = extract_message_string(err_val)
+                action_info["status_code"] = msg_str
+
     except Exception as e:
         log(f"解析续期动作响应异常: {e}")
     return action_info
@@ -191,7 +188,7 @@ def run_auto_renew():
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
 
-    # 接口 A 专用的 Payload (已更新为包含 data 对象的结构)
+    # 接口 A 专用的 Payload
     action_payload = {
         "t": {
             "t": 10,
@@ -246,27 +243,30 @@ def run_auto_renew():
         log("⚠️ 无法精确计算剩余天数，默认触发续期指令以确保安全...")
 
     # ----------------------------------------------------
-    # 步骤 2: 发送 [接口 A] 触发续期动作
+    # 步骤 2: 发送 [接口 A] 触发续期动作 (含延时自动重试)
     # ----------------------------------------------------
     log("⚡ 步骤 2: 发送 [接口 A] 触发续期动作...")
     action_info = {"status_code": "无有效数据返回", "expires_at": None}
     
-    for attempt in range(1, 3):
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
         try:
+            log(f"  👉 发送续期请求 (尝试 {attempt}/{max_attempts})...")
             action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=action_payload, timeout=15)
             if action_res.status_code == 200:
                 res_data = action_res.json()
                 action_info = parse_action_response(res_data)
                 
+                status_msg = str(action_info["status_code"])
                 log("    📥 [接口A 返回快照] ----------------------------")
-                log(f"    原始响应文本: {action_res.text}")
-                log(f"    动作响应提示 : {action_info['status_code']}")
+                log(f"    动作响应提示 : {status_msg}")
                 log(f"    捕获动作到期时间: {action_info['expires_at']}")
                 log("    ------------------------------------------------")
 
-                if "take a moment" in str(action_info["status_code"]).lower() and attempt == 1:
-                    log("⚠️ 收到频繁操作提示，等待 4 秒后重试...")
-                    time.sleep(4)
+                # 如果服务端提示等待后再确认续期，做 5 秒延时重试
+                if "take a moment" in status_msg.lower() and attempt < max_attempts:
+                    log("⏳ 检测到服务端冷冻/确认机制提示，延时 5 秒后自动发起二次验证请求...")
+                    time.sleep(5)
                     continue
                 break
             else:
@@ -282,6 +282,8 @@ def run_auto_renew():
     # 步骤 3: 再次发送 [接口 B] 二次校验最终结果
     # ----------------------------------------------------
     log("🔍 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据...")
+    # 额外等待 1 秒，确保后端数据库异步事务提交完毕
+    time.sleep(1)
     after_info = fetch_server_details(base_headers, detail_payload)
 
     final_name = after_info["name"] if after_info["name"] != "未知" else server_name
