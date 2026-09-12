@@ -67,7 +67,7 @@ def get_new_token():
     return None
 
 def run_direct_renew():
-    log("▶️ 开始运行：登录后直接执行续期动作（步骤 1）...")
+    log("▶️ 开始运行：登录后直接执行续期动作（修正 Payload 结构）...")
 
     token = get_new_token()
     if not token:
@@ -85,7 +85,7 @@ def run_direct_renew():
         "x-tsr-serverfn": "true"
     }
 
-    # 接口 A 的续期 Payload
+    # 修正后的接口 A Payload（字段名已改为服务端要求的 "id"）
     renew_payload = {
         "t": {
             "t": 10,
@@ -97,7 +97,7 @@ def run_direct_renew():
                         "t": 10,
                         "i": 1,
                         "p": {
-                            "k": ["serverId"],
+                            "k": ["id"],
                             "v": [{"t": 1, "s": SERVER_ID}]
                         },
                         "o": 0
@@ -110,9 +110,9 @@ def run_direct_renew():
     }
 
     # ----------------------------------------------------
-    # 直接执行【步骤 1】：发送 [接口 A] 触发续期动作
+    # 直接执行步骤 1：发送 [接口 A] 触发续期动作
     # ----------------------------------------------------
-    log("⚡ 步骤 1: 登录完成，直接发送 [接口 A] 触发续期动作...")
+    log("⚡ 步骤 1: 登录完成，发送修正后的 [接口 A] 触发续期动作...")
     
     try:
         action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
