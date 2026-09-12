@@ -85,7 +85,7 @@ def parse_action_response(res_json):
     return action_info
 
 def parse_detail_response(res_json):
-    """解析【接口 B】返回的完整详情包"""
+    """解析【接口 B】返回的完整详情包 (原版逻辑，严禁改动)"""
     info = {"name": "未知", "status": "未知", "expires_at": None}
     try:
         outer_v = res_json.get("p", {}).get("v", [])
@@ -171,6 +171,7 @@ def run_auto_renew():
         "x-tsr-serverfn": "true"
     }
 
+    # 100% 还原原版 Payload（用于接口 A 和 接口 B）
     renew_payload = {
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
