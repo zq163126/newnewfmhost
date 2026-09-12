@@ -16,7 +16,7 @@ RENEW_DETAIL_URL = "https://freemchost.com/_serverFn/c3a45c08362f2f613bbb6d511a3
 SERVER_ID = "0ac36ad6-6dbe-4766-a92e-498d68866539"
 SCKEY = os.getenv("SCKEY")
 
-# 允许续期的阈值天数（低于或等于此天数时触发续期 A 动作）
+# 允许续期的阈值天数（低于或等于此天数时触发续期动作）
 RENEW_THRESHOLD_DAYS = 2.0
 
 if not all([EMAIL, PASSWORD, SUPABASE_ANON_KEY]):
@@ -47,7 +47,7 @@ def parse_iso_datetime(dt_str):
         return None
 
 def parse_action_response(res_json):
-    action_info = {"expires_at": None, "status_code": "未知"}
+    action_info = {"expires_at": None, "status_code": "成功"}
     try:
         if isinstance(res_json, dict):
             outer_p = res_json.get("p", {})
@@ -170,8 +170,32 @@ def run_auto_renew():
         "x-tsr-serverfn": "true"
     }
 
-    # 接口 B (详情查询) 与 接口 A (动作) 使用均匹配 "id" 的正确 Payload
-    renew_payload = {
+    # 1. 接口 B (详情查询) 专用 Payload（参数名为 serverId）
+    detail_payload = {
+        "t": {
+            "t": 10,
+            "i": 0,
+            "p": {
+                "k": ["data"],
+                "v": [
+                    {
+                        "t": 10,
+                        "i": 1,
+                        "p": {
+                            "k": ["serverId"],
+                            "v": [{"t": 1, "s": SERVER_ID}]
+                        },
+                        "o": 0
+                    }
+                ]
+            }
+        },
+        "f": 63,
+        "m": []
+    }
+
+    # 2. 接口 A (触发动作) 专用 Payload（参数名为 id）
+    action_payload = {
         "t": {
             "t": 10,
             "i": 0,
@@ -198,7 +222,7 @@ def run_auto_renew():
     # 步骤 1: 请求 [接口 B] 初始化上下文并预查服务器状态
     # ----------------------------------------------------
     log("🔍 步骤 1: 请求 [接口 B] 加载页面上下文并校验服务器到期时间...")
-    before_info = fetch_server_details(base_headers, renew_payload)
+    before_info = fetch_server_details(base_headers, detail_payload)
     
     server_name = before_info["name"]
     server_status = before_info["status"]
@@ -224,7 +248,7 @@ def run_auto_renew():
     else:
         log("⚠️ 无法精确计算剩余天数，默认触发续期指令...")
 
-    # ⏳ 在接口 B 和 接口 A 之间加入 3 秒休眠，模拟真实页面浏览间隔
+    # ⏳ 页面防抖等待
     log("⏳ 正在模拟人类浏览页面，等待 3 秒后点击续期按钮...")
     time.sleep(3)
 
@@ -232,17 +256,18 @@ def run_auto_renew():
     # 步骤 2: 发送 [接口 A] 触发续期动作
     # ----------------------------------------------------
     log("⚡ 步骤 2: 发送 [接口 A] 触发续期动作...")
-    action_info = {"status_code": "未知", "expires_at": None}
+    action_info = {"status_code": "成功", "expires_at": None}
     
     try:
-        action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
+        action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=action_payload, timeout=15)
         if action_res.status_code == 200:
             res_json = action_res.json()
             action_info = parse_action_response(res_json)
             
             log("    📥 [接口 A 返回快照] ----------------------------")
-            log(f"    动作响应提示 : {action_info['status_code']}")
-            log(f"    捕获动作到期时间: {action_info['expires_at']}")
+            log(f"    动作响应状态 : {action_info['status_code']}")
+            if action_info['expires_at']:
+                log(f"    捕获动作到期时间: {action_info['expires_at']}")
             log("    ------------------------------------------------")
         else:
             log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}")
@@ -254,10 +279,11 @@ def run_auto_renew():
         sys.exit(1)
 
     # ----------------------------------------------------
-    # 步骤 3: 再次请求 [接口 B] 确认续期后的最新数据
+    # 步骤 3: 再次请求 [接口 B] 确认续期后的最新数据 (等待 2 秒以确保 DB 写入完成)
     # ----------------------------------------------------
+    time.sleep(2)
     log("🔍 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据...")
-    after_info = fetch_server_details(base_headers, renew_payload)
+    after_info = fetch_server_details(base_headers, detail_payload)
 
     final_name = after_info["name"] if after_info["name"] != "未知" else server_name
     final_status = after_info["status"] if after_info["status"] != "未知" else server_status
@@ -278,7 +304,7 @@ def run_auto_renew():
             f"最新到期时间：{final_expires_at}"
         )
     else:
-        err_msg = action_info.get("status_code", "时间无变化")
+        err_msg = action_info.get("status_code", "时间未刷新")
         log(f" ⚠️ 状态判定: 到期时间未发生变动 (服务端响应: {err_msg})")
         notify(
             "服务器续期状态通知", 
