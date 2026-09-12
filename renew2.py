@@ -171,7 +171,13 @@ def run_auto_renew():
         "x-tsr-serverfn": "true"
     }
 
-    renew_payload = {
+    # 接口 B (详情查询) 专用 Payload - 保持原样 (serverId)
+    detail_payload = {
+        "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["serverId"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
+    }
+
+    # 接口 A (续期动作) 专用 Payload - 仅修改此处 (id)
+    action_payload = {
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
 
@@ -179,7 +185,7 @@ def run_auto_renew():
     # 步骤 1: 发送 [接口 B] 预检查服务器状态与剩余时间
     # ----------------------------------------------------
     log("🔍 步骤 1: 请求 [接口 B] 校验服务器状态及到期时间...")
-    before_info = fetch_server_details(base_headers, renew_payload)
+    before_info = fetch_server_details(base_headers, detail_payload)
     
     server_name = before_info["name"]
     server_status = before_info["status"]
@@ -218,7 +224,7 @@ def run_auto_renew():
     
     for attempt in range(1, 3):
         try:
-            action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
+            action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=action_payload, timeout=15)
             if action_res.status_code == 200:
                 action_info = parse_action_response(action_res.json())
                 
@@ -245,7 +251,7 @@ def run_auto_renew():
     # 步骤 3: 再次发送 [接口 B] 二次校验最终结果
     # ----------------------------------------------------
     log("🔍 步骤 3: 再次请求 [接口 B] 二次确认续期后的最新数据...")
-    after_info = fetch_server_details(base_headers, renew_payload)
+    after_info = fetch_server_details(base_headers, detail_payload)
 
     final_name = after_info["name"] if after_info["name"] != "未知" else server_name
     final_status = after_info["status"] if after_info["status"] != "未知" else server_status
