@@ -67,7 +67,7 @@ def get_new_token():
     return None
 
 def run_direct_renew():
-    log("▶️ 开始运行：登录后直接执行续期动作（修正 Payload 结构）...")
+    log("▶️ 开始运行：登录后直接执行续期动作（含频繁操作重试）...")
 
     token = get_new_token()
     if not token:
@@ -85,7 +85,6 @@ def run_direct_renew():
         "x-tsr-serverfn": "true"
     }
 
-    # 修正后的接口 A Payload（字段名已改为服务端要求的 "id"）
     renew_payload = {
         "t": {
             "t": 10,
@@ -110,26 +109,39 @@ def run_direct_renew():
     }
 
     # ----------------------------------------------------
-    # 直接执行步骤 1：发送 [接口 A] 触发续期动作
+    # 步骤 1: 发送 [接口 A] 触发续期动作 (最多尝试 3 次)
     # ----------------------------------------------------
-    log("⚡ 步骤 1: 登录完成，发送修正后的 [接口 A] 触发续期动作...")
-    
-    try:
-        action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
-        log(f"📥 [接口 A] HTTP 响应状态码: {action_res.status_code}")
-        log(f"📄 [接口 A] 原始返回内容:\n{action_res.text}")
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        log(f"⚡ 步骤 1: 尝试发送 [接口 A] 触发续期动作 (第 {attempt}/{max_attempts} 次)...")
+        
+        try:
+            action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=renew_payload, timeout=15)
+            log(f"📥 [接口 A] HTTP 响应状态码: {action_res.status_code}")
+            res_text = action_res.text
+            log(f"📄 [接口 A] 原始返回内容:\n{res_text}")
 
-        if action_res.status_code == 200:
-            log("✅ [接口 A] 请求已发送完毕！请查看上方原始返回内容。")
-        else:
-            log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}")
-            notify("服务器自动续期失败", f"续期 Action 接口返回状态码: {action_res.status_code}")
+            if action_res.status_code == 200:
+                if "take a moment" in res_text.lower():
+                    if attempt < max_attempts:
+                        wait_sec = 6
+                        log(f"⚠️ 收到频率限制提示，系统将自动等待 {wait_sec} 秒后再次重试...")
+                        time.sleep(wait_sec)
+                        continue
+                    else:
+                        log("❌ 已达到最大重试次数，服务端仍提示等待，请稍后再试。")
+                else:
+                    log("🎉 [接口 A] 响应未触发冷却限制，动作执行完成！")
+                    break
+            else:
+                log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}")
+                notify("服务器自动续期失败", f"续期 Action 接口返回状态码: {action_res.status_code}")
+                sys.exit(1)
+                
+        except Exception as e:
+            log(f"💥 续期动作接口引发异常: {e}")
+            notify("服务器自动续期异常", f"Action 阶段异常: {e}")
             sys.exit(1)
-            
-    except Exception as e:
-        log(f"💥 续期动作接口引发异常: {e}")
-        notify("服务器自动续期异常", f"Action 阶段异常: {e}")
-        sys.exit(1)
 
 if __name__ == "__main__":
     run_direct_renew()
