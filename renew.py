@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 from datetime import datetime, timezone
 import requests
 
@@ -58,6 +59,7 @@ def parse_action_response(res_json):
         keys = outer_p.get("k", [])
         values = outer_p.get("v", [])
 
+        # 解析成功结果
         if "result" in keys:
             idx = keys.index("result")
             if idx < len(values):
@@ -71,16 +73,26 @@ def parse_action_response(res_json):
                         action_info["expires_at"] = sub_values[sub_idx].get("s")
                         action_info["status_code"] = "成功触发"
         
+        # 解析错误响应
         if "error" in keys:
             err_idx = keys.index("error")
             if err_idx < len(values):
                 err_val = values[err_idx]
                 if isinstance(err_val, dict):
-                    msg_obj = err_val.get("message", {})
-                    if isinstance(msg_obj, dict):
-                        action_info["status_code"] = msg_obj.get("s", str(msg_obj))
-                    else:
-                        action_info["status_code"] = str(msg_obj)
+                    msg_obj = err_val.get("s", "")
+                    if not msg_obj:
+                        msg_obj = err_val.get("message", {}).get("s", "")
+                    
+                    # 尝试解析 JSON 格式的错误信息
+                    try:
+                        parsed_msg = json.loads(msg_obj)
+                        if isinstance(parsed_msg, list) and len(parsed_msg) > 0:
+                            first_err = parsed_msg[0]
+                            action_info["status_code"] = f"校验错误: {first_err.get('message')} ({first_err.get('code')})"
+                        else:
+                            action_info["status_code"] = str(msg_obj)
+                    except Exception:
+                        action_info["status_code"] = str(msg_obj) if msg_obj else str(err_val)
                 else:
                     action_info["status_code"] = str(err_val)
     except Exception as e:
@@ -88,7 +100,7 @@ def parse_action_response(res_json):
     return action_info
 
 def parse_detail_response(res_json):
-    """解析【接口 B】返回的完整详情包（保持不动）"""
+    """解析【接口 B】返回的完整详情包"""
     info = {"name": "未知", "status": "未知", "expires_at": None}
     try:
         outer_v = res_json.get("p", {}).get("v", [])
@@ -146,7 +158,7 @@ def get_new_token():
     return None
 
 def fetch_server_details(headers, payload):
-    """请求【接口 B】提取最新完整服务器状态（保持不动）"""
+    """请求【接口 B】提取最新完整服务器状态"""
     try:
         res = requests.post(RENEW_DETAIL_URL, headers=headers, json=payload, timeout=15)
         if res.status_code == 200:
@@ -174,19 +186,28 @@ def run_auto_renew():
         "x-tsr-serverfn": "true"
     }
 
-    # 接口 B 专用的 Payload (保持不动)
+    # 接口 B 专用的 Payload
     detail_payload = {
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
 
-    # 接口 A 专用的 Payload (已修正结构)
+    # 接口 A 专用的 Payload (已更新为包含 data 对象的结构)
     action_payload = {
         "t": {
             "t": 10,
             "i": 0,
             "p": {
-                "k": ["id"],
-                "v": [{"t": 1, "s": SERVER_ID}]
+                "k": ["data"],
+                "v": [
+                    {
+                        "t": 10,
+                        "i": 1,
+                        "p": {
+                            "k": ["id"],
+                            "v": [{"t": 1, "s": SERVER_ID}]
+                        }
+                    }
+                ]
             }
         },
         "f": 63,
