@@ -53,7 +53,6 @@ def extract_message_string(obj):
     if isinstance(obj, str):
         return obj
     if isinstance(obj, dict):
-        # 优先提取特定结构中的字符串
         if "s" in obj:
             res = extract_message_string(obj["s"])
             if res and isinstance(res, str) and not res.startswith("{"):
@@ -262,7 +261,7 @@ def run_auto_renew():
     log("⚡ 步骤 2: 发送 [接口 A] 触发续期动作...")
     action_info = {"status_code": "无有效数据返回", "expires_at": None}
     
-    max_attempts = 3
+    max_attempts = 5
     for attempt in range(1, max_attempts + 1):
         try:
             log(f"  👉 发送续期请求 (尝试 {attempt}/{max_attempts})...")
@@ -277,10 +276,10 @@ def run_auto_renew():
                 log(f"    捕获动作到期时间: {action_info['expires_at']}")
                 log("    ------------------------------------------------")
 
-                # 如果服务端提示等待后再确认续期，做 5 秒延时重试
+                # 如果服务端提示等待后再确认续期，延长至 15 秒间隔进行重试
                 if "take a moment" in status_msg.lower() and attempt < max_attempts:
-                    log("⏳ 检测到服务端冷冻/确认机制提示，延时 5 秒后自动发起二次验证请求...")
-                    time.sleep(5)
+                    log("⏳ 检测到服务端冷冻/确认机制提示，延时 15 秒后自动发起二次验证请求...")
+                    time.sleep(15)
                     continue
                 break
             else:
