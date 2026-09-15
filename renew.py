@@ -15,6 +15,8 @@ SUPABASE_ANON_KEY = os.getenv("ANON_KEY")
 
 RENEW_ACTION_URL = "https://freemchost.com/_serverFn/798181797bd95a02dee916a26c18d3539a58152db8660e097ca48d7cdd8ee50c"
 RENEW_DETAIL_URL = "https://freemchost.com/_serverFn/c3a45c08362f2f613bbb6d511a3733a9e85e561709d48bec9280e82a4aa4f47d"
+# 预热/打开续期弹窗的会话关联接口（如果服务端有类似 pre-open/session 验证，可用详情或独立预热路由）
+RENEW_WARMUP_URL = RENEW_DETAIL_URL  # 复用详情接口预热 session 状态
 
 SERVER_ID = "0ac36ad6-6dbe-4766-a92e-498d68866539"
 SCKEY = os.getenv("SCKEY")
@@ -199,6 +201,15 @@ def fetch_server_details(headers, payload):
         log(f"⚠️ 拉取服务器详情异常: {e}")
     return {"name": "未知", "status": "未知", "expires_at": None}
 
+def warmup_renew_session(headers, detail_payload):
+    """模拟打开续期弹窗预热会话"""
+    log("🔄 预热续期弹窗 Session...")
+    try:
+        requests.post(RENEW_WARMUP_URL, headers=headers, json=detail_payload, timeout=10)
+        time.sleep(1.2) # 模拟前端弹窗渲染停留
+    except Exception:
+        pass
+
 def run_auto_renew():
     log("▶️ 开始全自动登录 + 智能链式续期检查流程...")
 
@@ -221,35 +232,6 @@ def run_auto_renew():
     # 接口 B 专用的 Payload
     detail_payload = {
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
-    }
-
-    # 接口 A 专用的 Payload（修正后合法长度的 token）
-    action_token_str = build_action_token(token, SERVER_ID)
-    action_payload = {
-        "t": {
-            "t": 10,
-            "i": 0,
-            "p": {
-                "k": ["data"],
-                "v": [{
-                    "t": 10,
-                    "i": 1,
-                    "p": {
-                        "k": ["id", "token", "hp", "dwell_ms"],
-                        "v": [
-                            {"t": 1, "s": SERVER_ID},
-                            {"t": 1, "s": action_token_str},
-                            {"t": 1, "s": ""},
-                            {"t": 0, "s": 9633},
-                        ],
-                    },
-                    "o": 0,
-                }],
-            },
-            "o": 0,
-        },
-        "f": 63,
-        "m": [],
     }
 
     # ----------------------------------------------------
@@ -281,7 +263,39 @@ def run_auto_renew():
         else:
             log(f"⚠️ 评估结果: 已进入续期窗口 (剩余 {days_left:.1f} 天 <= {RENEW_THRESHOLD_DAYS} 天)，准备发送续期指令...")
     else:
-        log("⚠️ 无法精确计算剩余天数，默认触发续期指令以确保安全...")
+        log("⚠️无法精确计算剩余天数，默认触发续期指令以确保安全...")
+
+    # 提前预热弹窗 session 解决过期校验
+    warmup_renew_session(base_headers, detail_payload)
+
+    # 接口 A 专用的 Payload（动态刷新时间戳和随机串）
+    action_token_str = build_action_token(token, SERVER_ID)
+    action_payload = {
+        "t": {
+            "t": 10,
+            "i": 0,
+            "p": {
+                "k": ["data"],
+                "v": [{
+                    "t": 10,
+                    "i": 1,
+                    "p": {
+                        "k": ["id", "token", "hp", "dwell_ms"],
+                        "v": [
+                            {"t": 1, "s": SERVER_ID},
+                            {"t": 1, "s": action_token_str},
+                            {"t": 1, "s": ""},
+                            {"t": 0, "s": 9633},
+                        ],
+                    },
+                    "o": 0,
+                }],
+            },
+            "o": 0,
+        },
+        "f": 63,
+        "m": [],
+    }
 
     # ----------------------------------------------------
     # 步骤 2: 发送 [接口 A] 触发续期动作 (含延时自动重试)
@@ -292,6 +306,11 @@ def run_auto_renew():
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
         try:
+            # 若重试则重新构造更新时间戳的 action_token
+            if attempt > 1:
+                action_payload["t"]["p"]["v"][0]["p"]["v"][1]["s"] = build_action_token(token, SERVER_ID)
+                warmup_renew_session(base_headers, detail_payload)
+
             log(f"  👉 发送续期请求 (尝试 {attempt}/{max_attempts})...")
             action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=action_payload, timeout=15)
             if action_res.status_code == 200:
@@ -304,10 +323,10 @@ def run_auto_renew():
                 log(f"    捕获动作到期时间: {action_info['expires_at']}")
                 log("    ------------------------------------------------")
 
-                # 如果服务端提示等待后再确认续期，延长至 15 秒间隔进行重试
-                if "take a moment" in status_msg.lower() and attempt < max_attempts:
-                    log("⏳ 检测到服务端冷冻/确认机制提示，延时 15 秒后自动发起二次验证请求...")
-                    time.sleep(15)
+                # 如果提示 session 过期或需要确认，重试
+                if any(k in status_msg.lower() for k in ["session", "expired", "reopen", "moment"]) and attempt < max_attempts:
+                    log(f"⏳ 检测到服务端提示 ({status_msg})，等待 3 秒后重新热启动并重试...")
+                    time.sleep(3)
                     continue
                 break
             else:
