@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import json
+import base64
+import uuid
 from datetime import datetime, timezone
 import requests
 
@@ -167,6 +169,26 @@ def get_new_token():
         log(f"💥 登录请求引发异常: {e}")
     return None
 
+def build_action_token(jwt_token, server_id):
+    """安全构造满足 Zod 长度限制 (<400) 的复合动作 Token"""
+    sub = "9dc68816-12a4-4521-9b92-e34483bea107"
+    try:
+        parts = jwt_token.split(".")
+        if len(parts) >= 2:
+            payload_padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            payload_bytes = base64.urlsafe_b64decode(payload_padded)
+            payload_data = json.loads(payload_bytes.decode("utf-8"))
+            if "sub" in payload_data:
+                sub = payload_data["sub"]
+    except Exception:
+        pass
+    
+    rand_uuid = str(uuid.uuid4())
+    ts = int(time.time() * 1000)
+    mock_hash = "c232223da4bd0100fd3452c46c1b66c902be0e45b0f5c93b2b910956bc310cb1"
+    token_str = f"{sub}.{server_id}.{rand_uuid}.{ts}.{mock_hash}"
+    return token_str
+
 def fetch_server_details(headers, payload):
     """请求【接口 B】提取最新完整服务器状态"""
     try:
@@ -201,7 +223,8 @@ def run_auto_renew():
         "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}}, "f": 63, "m": []
     }
 
-    # 接口 A 专用的 Payload（融合了您前文抓包包含 id、token、hp、dwell_ms 的完整结构）
+    # 接口 A 专用的 Payload（修正后合法长度的 token）
+    action_token_str = build_action_token(token, SERVER_ID)
     action_payload = {
         "t": {
             "t": 10,
@@ -215,7 +238,7 @@ def run_auto_renew():
                         "k": ["id", "token", "hp", "dwell_ms"],
                         "v": [
                             {"t": 1, "s": SERVER_ID},
-                            {"t": 1, "s": f"{token}.{SERVER_ID}.dbb5c7b2-39db-427e-8d4c-9afef65479b9.1789207266509.c232223da4bd0100fd3452c46c1b66c902be0e45b0f5c93b2b910956bc310cb1"},
+                            {"t": 1, "s": action_token_str},
                             {"t": 1, "s": ""},
                             {"t": 0, "s": 9633},
                         ],
