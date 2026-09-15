@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import re
 from datetime import datetime, timezone
 from playwright.sync_api import sync_playwright
 import requests
@@ -44,29 +45,6 @@ def parse_iso_datetime(dt_str):
         return datetime.fromisoformat(clean_str)
     except Exception:
         return None
-
-def extract_message_string(obj):
-    if isinstance(obj, str):
-        return obj
-    if isinstance(obj, dict):
-        if "s" in obj:
-            res = extract_message_string(obj["s"])
-            if res and isinstance(res, str) and not res.startswith("{"):
-                return res
-        if "message" in obj:
-            res = extract_message_string(obj["message"])
-            if res:
-                return res
-        for v in obj.values():
-            res = extract_message_string(v)
-            if res and isinstance(res, str) and len(res) > 0 and not res.startswith("{"):
-                return res
-    if isinstance(obj, list):
-        for item in obj:
-            res = extract_message_string(item)
-            if res:
-                return res
-    return str(obj)
 
 def parse_detail_response(res_json):
     info = {"name": "未知", "status": "未知", "expires_at": None}
@@ -144,19 +122,6 @@ def run_auto_renew_browser():
         notify("服务器自动续期失败", "模拟登录未获取 Token")
         sys.exit(1)
 
-    base_headers = {
-        "accept": "application/x-tss-framed, application/x-ndjson, application/json",
-        "authorization": f"Bearer {token}",
-        "content-type": "application/json",
-        "origin": "https://freemchost.com",
-        "referer": TARGET_URL,
-        "x-tsr-serverfn": "true"
-    }
-    detail_payload = {
-        "t": {"t": 10, "i": 0, "p": {"k": ["data"], "v": [{"t": 10, "i": 1, "p": {"k": ["id"], "v": [{"t": 1, "s": SERVER_ID}]}, "o": 0}]}},
-        "f": 63, "m": []
-    }
-
     log("🔍 步骤 1: 请求 [接口 B] 校验服务器状态及到期时间...")
     before_info = fetch_server_details_api(token)
     server_name = before_info["name"]
@@ -184,7 +149,7 @@ def run_auto_renew_browser():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 800})
         
-        # 注入 LocalStorage / Cookie 保持登录态
+        # 注入 LocalStorage 保持登录态
         context.add_init_script(f"""
             window.localStorage.setItem('supabase.auth.token', JSON.stringify({{
                 currentSession: {{ access_token: '{token}' }},
@@ -198,24 +163,31 @@ def run_auto_renew_browser():
             page.goto(TARGET_URL, timeout=30000, wait_until="networkidle")
             time.sleep(3)
 
-            # 寻找并点击续期/延长按钮（根据语义或文本适配）
-            log("🖱️ 寻找续期触发按钮...")
-            renew_btn = page.locator("button:has-text('Renew'), button:has-text('续期'), button:has-text('Extend')").first
-            if renew_btn.is_visible(timeout=5000):
-                renew_btn.click()
-                log("🖱️ 已点击续期弹窗触发按钮，等待确认...")
+            log("🖱️ 寻找续期触发按钮（多路策略匹配）...")
+            renew_regex = re.compile(r"续期|renew|extend|延长", re.IGNORECASE)
+            
+            # 策略 A: 宽泛标签匹配 (button, a, [role='button'], div/span 包含文字)
+            target = page.locator("button, a, [role='button']").filter(has_text=renew_regex).first
+            if target.count() == 0 or not target.is_visible(timeout=3000):
+                target = page.locator("text=" + "续期") if page.locator("text=续期").count() > 0 else page.get_by_text(renew_regex).first
+
+            if target.count() > 0:
+                target.first.click(timeout=5000)
+                log("🖱️ 已点击续期触发器，等待确认...")
                 time.sleep(2)
                 
                 # 寻找弹窗内的确认提交按钮
-                confirm_btn = page.locator("button:has-text('Confirm'), button:has-text('确认'), button:has-text('Submit')").first
-                if confirm_btn.is_visible(timeout=5000):
+                confirm_regex = re.compile(r"确认|confirm|submit|yes|ok|确定", re.IGNORECASE)
+                confirm_btn = page.locator("button, [role='button']").filter(has_text=confirm_regex).first
+                if confirm_btn.count() > 0 and confirm_btn.is_visible(timeout=3000):
                     confirm_btn.click()
                     log("🖱️ 已点击确认续期提交!")
                     time.sleep(3)
                 else:
-                    log("⚠️ 未显式找到弹窗确认按钮，可能点击即触发。")
+                    log("⚠️ 未显式找到弹窗确认按钮，可能点击即完成。")
             else:
-                log("⚠️ 未在页面直接定位到续期按钮，检查元素或是否需要展开更多菜单。")
+                body_text = page.inner_text("body")[:400].replace("\n", " | ")
+                log(f"⚠️ 未能命中续期按钮。页面文本片段预览: {body_text}")
         except Exception as e:
             log(f"💥 浏览器自动化操作异常: {e}")
         finally:
@@ -233,7 +205,7 @@ def run_auto_renew_browser():
     log(f" 当前运行状态: {final_status}")
     log(f" 续期前到期时间: {expires_at_str}")
     log(f" 续期后到期时间: {final_expires_at}")
-
+    
     if final_expires_at != expires_at_str:
         log(" ✅ 状态判定: 成功延长续期！")
         notify("服务器自动续期成功", f"服务器 [{server_name}] 已成功续期至 {final_expires_at}")
