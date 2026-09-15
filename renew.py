@@ -15,8 +15,7 @@ SUPABASE_ANON_KEY = os.getenv("ANON_KEY")
 
 RENEW_ACTION_URL = "https://freemchost.com/_serverFn/798181797bd95a02dee916a26c18d3539a58152db8660e097ca48d7cdd8ee50c"
 RENEW_DETAIL_URL = "https://freemchost.com/_serverFn/c3a45c08362f2f613bbb6d511a3733a9e85e561709d48bec9280e82a4aa4f47d"
-# 预热/打开续期弹窗的会话关联接口（如果服务端有类似 pre-open/session 验证，可用详情或独立预热路由）
-RENEW_WARMUP_URL = RENEW_DETAIL_URL  # 复用详情接口预热 session 状态
+RENEW_WARMUP_URL = RENEW_DETAIL_URL  # 复用详情接口预热会话
 
 SERVER_ID = "0ac36ad6-6dbe-4766-a92e-498d68866539"
 SCKEY = os.getenv("SCKEY")
@@ -78,7 +77,7 @@ def extract_message_string(obj):
 
 def parse_action_response(res_json):
     """解析【接口 A】返回的响应"""
-    action_info = {"expires_at": None, "status_code": "无有效数据返回"}
+    action_info = {"expires_at": None, "status_code": "无有效数据返回", "raw_dump": json.dumps(res_json, ensure_ascii=False)}
     if not res_json or not isinstance(res_json, dict):
         return action_info
 
@@ -205,10 +204,10 @@ def warmup_renew_session(headers, detail_payload):
     """模拟打开续期弹窗预热会话"""
     log("🔄 预热续期弹窗 Session...")
     try:
-        requests.post(RENEW_WARMUP_URL, headers=headers, json=detail_payload, timeout=10)
-        time.sleep(1.2) # 模拟前端弹窗渲染停留
-    except Exception:
-        pass
+        res = requests.post(RENEW_WARMUP_URL, headers=headers, json=detail_payload, timeout=10)
+        log(f"🔄 预热响应状态码: {res.status_code}")
+    except Exception as e:
+        log(f"⚠️ 预热请求异常: {e}")
 
 def run_auto_renew():
     log("▶️ 开始全自动登录 + 智能链式续期检查流程...")
@@ -263,12 +262,12 @@ def run_auto_renew():
         else:
             log(f"⚠️ 评估结果: 已进入续期窗口 (剩余 {days_left:.1f} 天 <= {RENEW_THRESHOLD_DAYS} 天)，准备发送续期指令...")
     else:
-        log("⚠️无法精确计算剩余天数，默认触发续期指令以确保安全...")
+        log("⚠️ 无法精确计算剩余天数，默认触发续期指令以确保安全...")
 
     # 提前预热弹窗 session 解决过期校验
     warmup_renew_session(base_headers, detail_payload)
 
-    # 接口 A 专用的 Payload（动态刷新时间戳和随机串）
+    # 接口 A 专用的 Payload
     action_token_str = build_action_token(token, SERVER_ID)
     action_payload = {
         "t": {
@@ -301,42 +300,38 @@ def run_auto_renew():
     # 步骤 2: 发送 [接口 A] 触发续期动作 (含延时自动重试)
     # ----------------------------------------------------
     log("⚡ 步骤 2: 发送 [接口 A] 触发续期动作...")
-    action_info = {"status_code": "无有效数据返回", "expires_at": None}
+    action_info = {"status_code": "无有效数据返回", "expires_at": None, "raw_dump": ""}
     
-    max_attempts = 5
+    max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            # 若重试则重新构造更新时间戳的 action_token
             if attempt > 1:
                 action_payload["t"]["p"]["v"][0]["p"]["v"][1]["s"] = build_action_token(token, SERVER_ID)
                 warmup_renew_session(base_headers, detail_payload)
 
             log(f"  👉 发送续期请求 (尝试 {attempt}/{max_attempts})...")
             action_res = requests.post(RENEW_ACTION_URL, headers=base_headers, json=action_payload, timeout=15)
+            log(f"  📥 [接口A HTTP Status]: {action_res.status_code}")
+            
             if action_res.status_code == 200:
                 res_data = action_res.json()
                 action_info = parse_action_response(res_data)
                 
                 status_msg = str(action_info["status_code"])
-                log("    📥 [接口A 返回快照] ----------------------------")
+                log("    📥 [接口A 解析快照] ----------------------------")
                 log(f"    动作响应提示 : {status_msg}")
-                log(f"    捕获动作到期时间: {action_info['expires_at']}")
+                log(f"    原始返回全文 : {action_info['raw_dump'][:300]}")
                 log("    ------------------------------------------------")
 
-                # 如果提示 session 过期或需要确认，重试
                 if any(k in status_msg.lower() for k in ["session", "expired", "reopen", "moment"]) and attempt < max_attempts:
-                    log(f"⏳ 检测到服务端提示 ({status_msg})，等待 3 秒后重新热启动并重试...")
-                    time.sleep(3)
+                    log(f"⏳ 检测到服务端提示 ({status_msg})，等待 5 秒后重试...")
+                    time.sleep(5)
                     continue
                 break
             else:
-                log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}")
-                notify("服务器自动续期失败", f"续期 Action 接口返回状态码: {action_res.status_code}")
-                sys.exit(1)
+                log(f"❌ 续期动作请求失败，HTTP 状态码: {action_res.status_code}, 文本: {action_res.text[:200]}")
         except Exception as e:
             log(f"💥 续期动作接口异常: {e}")
-            notify("服务器自动续期异常", f"Action 阶段异常: {e}")
-            sys.exit(1)
 
     # ----------------------------------------------------
     # 步骤 3: 再次发送 [接口 B] 二次校验最终结果
